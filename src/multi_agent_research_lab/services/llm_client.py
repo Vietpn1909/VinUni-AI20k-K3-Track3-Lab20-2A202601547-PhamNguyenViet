@@ -13,12 +13,15 @@ from multi_agent_research_lab.core.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-# Approximate pricing per 1M tokens (gpt-4o-mini, as of 2024)
+# Approximate pricing per 1M tokens
 _PRICING: dict[str, tuple[float, float]] = {
     "gpt-4o-mini": (0.15, 0.60),      # (input, output) per 1M tokens
     "gpt-4o": (2.50, 10.00),
     "gpt-4": (30.00, 60.00),
     "gpt-3.5-turbo": (0.50, 1.50),
+    # OpenRouter model names
+    "openai/gpt-4o-mini": (0.15, 0.60),
+    "openai/gpt-4o": (2.50, 10.00),
 }
 
 
@@ -48,6 +51,7 @@ class LLMClient:
         self._temperature = temperature
         self._client = OpenAI(
             api_key=settings.openai_api_key,
+            base_url=settings.openai_base_url,
             timeout=settings.timeout_seconds,
         )
 

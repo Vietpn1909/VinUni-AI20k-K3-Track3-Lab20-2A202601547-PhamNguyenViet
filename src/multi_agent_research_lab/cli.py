@@ -13,6 +13,7 @@ from multi_agent_research_lab.core.schemas import ResearchQuery
 from multi_agent_research_lab.core.state import ResearchState
 from multi_agent_research_lab.graph.workflow import MultiAgentWorkflow
 from multi_agent_research_lab.observability.logging import configure_logging
+from multi_agent_research_lab.observability.tracing import configure_tracing
 
 app = typer.Typer(help="Multi-Agent Research Lab starter CLI")
 console = Console()
@@ -21,6 +22,7 @@ console = Console()
 def _init() -> None:
     settings = get_settings()
     configure_logging(settings.log_level)
+    configure_tracing()
 
 
 def _parse_query(query: str) -> ResearchQuery:
@@ -73,11 +75,11 @@ def baseline(
 
     console.print(Panel.fit(state.final_answer, title="Single-Agent Baseline"))
     console.print(
-        f"\n[dim]⏱ Latency: {latency:.2f}s | "
-        f"Tokens: {response.input_tokens}→{response.output_tokens} | "
+        f"\n[dim]Latency: {latency:.2f}s | "
+        f"Tokens: {response.input_tokens}->{response.output_tokens} | "
         f"Cost: ${response.cost_usd:.6f}[/dim]"
         if response.cost_usd
-        else f"\n[dim]⏱ Latency: {latency:.2f}s[/dim]"
+        else f"\n[dim]Latency: {latency:.2f}s[/dim]"
     )
 
 
@@ -85,7 +87,7 @@ def baseline(
 def multi_agent(
     query: Annotated[str, typer.Option("--query", "-q", help="Research query")],
 ) -> None:
-    """Run the multi-agent workflow skeleton."""
+    """Run the multi-agent workflow."""
 
     _init()
     state = ResearchState(request=_parse_query(query))
@@ -95,8 +97,75 @@ def multi_agent(
     except StudentTodoError as exc:
         console.print(Panel.fit(str(exc), title="Expected TODO", style="yellow"))
         raise typer.Exit(code=2) from exc
-    console.print(result.model_dump_json(indent=2))
+
+    console.print(Panel.fit(result.final_answer or "No answer", title="Multi-Agent Result"))
+    console.print(f"\n[dim]Route history: {result.route_history}[/dim]")
+    console.print(f"[dim]Iterations: {result.iteration}[/dim]")
+
+
+@app.command()
+def benchmark(
+    query: Annotated[
+        str,
+        typer.Option("--query", "-q", help="Research query"),
+    ] = "Research GraphRAG state-of-the-art and write a 500-word summary",
+) -> None:
+    """Run benchmark comparing single-agent baseline vs multi-agent."""
+
+    _init()
+    from multi_agent_research_lab.evaluation.benchmark import run_benchmark
+    from multi_agent_research_lab.evaluation.report import render_markdown_report
+    from multi_agent_research_lab.services.storage import LocalArtifactStore
+
+    def baseline_runner(q: str) -> ResearchState:
+        from multi_agent_research_lab.services.llm_client import LLMClient
+
+        req = _parse_query(q)
+        st = ResearchState(request=req)
+        llm = LLMClient()
+        resp = llm.complete(
+            system_prompt=(
+                "You are a research assistant. Provide a comprehensive, "
+                "well-structured answer. Write for technical learners. "
+                "Keep under 500 words."
+            ),
+            user_prompt=req.query,
+        )
+        st.final_answer = resp.content
+        st.add_trace_event("baseline", {
+            "cost_usd": resp.cost_usd,
+            "input_tokens": resp.input_tokens,
+            "output_tokens": resp.output_tokens,
+        })
+        return st
+
+    def multi_agent_runner(q: str) -> ResearchState:
+        req = _parse_query(q)
+        st = ResearchState(request=req)
+        wf = MultiAgentWorkflow()
+        return wf.run(st)
+
+    console.print("[bold]Running benchmark...[/bold]\n")
+
+    # Run baseline
+    console.print("[yellow]> Running baseline...[/yellow]")
+    _, baseline_metrics = run_benchmark("baseline", query, baseline_runner)
+    console.print(f"  OK Baseline done ({baseline_metrics.latency_seconds:.2f}s)\n")
+
+    # Run multi-agent
+    console.print("[yellow]> Running multi-agent...[/yellow]")
+    _, multi_metrics = run_benchmark("multi-agent", query, multi_agent_runner)
+    console.print(f"  OK Multi-agent done ({multi_metrics.latency_seconds:.2f}s)\n")
+
+    # Generate report
+    report = render_markdown_report([baseline_metrics, multi_metrics])
+    store = LocalArtifactStore()
+    path = store.write_text("benchmark_report.md", report)
+
+    console.print(Panel.fit(report, title="Benchmark Report"))
+    console.print(f"\n[green]Report saved to: {path}[/green]")
 
 
 if __name__ == "__main__":
     app()
+
